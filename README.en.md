@@ -105,7 +105,7 @@ Example response:
 | `PUBLIC_BASE_URL` | unset | Override the generated file base URL |
 | `DEFAULT_RESPONSE_FORMAT` | `b64_json` | Default response format when the client omits it |
 | `ALWAYS_INCLUDE_B64_JSON` | `false` | Always include `b64_json` even when `url` is requested |
-| `ALWAYS_INCLUDE_URL` | `true` | Always include a `url` when persistence is enabled |
+| `ALWAYS_INCLUDE_URL` | `false` | Also attach `url` when the client requests `b64_json` (significantly enlarges the response body) |
 | `CLEANUP_MAX_AGE_SECONDS` | `0` | Delete files older than this age, disabled when `0` |
 | `CLEANUP_SWEEP_INTERVAL_SECONDS` | `3600` | Minimum delay between cleanup sweeps |
 
@@ -140,6 +140,24 @@ or object entries:
 - If your upstream should not receive the caller's token, set `UPSTREAM_AUTH_HEADER`.
 
 See [examples/nginx.conf](examples/nginx.conf) and [examples/openai-image-bridge.service](examples/openai-image-bridge.service).
+
+### Behind Cloudflare / a WAF
+
+If you put the bridge behind Cloudflare or any reverse proxy with a managed WAF, prefer the `url` response format:
+
+```
+DEFAULT_RESPONSE_FORMAT=url
+ALWAYS_INCLUDE_B64_JSON=false
+ALWAYS_INCLUDE_URL=false
+PERSIST_IMAGES=true
+PUBLIC_BASE_URL=https://your.public.domain
+```
+
+Why:
+
+- `b64_json` embeds the entire image inside the JSON response. A single 1024×1024 PNG inflates the body to over 1 MB, and intermediate hops (CDN / WAF / reverse proxy) are far more likely to truncate or rate-limit very large single responses.
+- Long base64 strings can also match managed WAF rules that treat them as suspicious payloads, causing the response to be dropped silently — the upstream succeeds and gets billed, but the client never receives the result.
+- Switching to `url` makes the client perform a separate, plain image download, which is a normal binary response and rarely triggers any of the above.
 
 ## Limitations
 
