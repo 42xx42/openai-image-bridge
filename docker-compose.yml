@@ -1,0 +1,11 @@
+services:
+  openai-image-bridge:
+    build: .
+    container_name: openai-image-bridge
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data/generated:/app/data/generated
+    restart: unless-stopped

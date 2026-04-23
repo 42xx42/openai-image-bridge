@@ -1,0 +1,15 @@
+[Unit]
+Description=OpenAI Image Bridge
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/openai-image-bridge
+EnvironmentFile=/opt/openai-image-bridge/.env
+ExecStart=/usr/bin/python3 -m openai_image_bridge
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
