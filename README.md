@@ -153,3 +153,8 @@ Run tests with:
 ```bash
 python -m unittest discover -s tests -q
 ```
+
+## Acknowledgements
+
+- Thanks to the [LINUX DO community](https://linux.do) for the discussion and experimentation that inspired this project.
+- Related discussion: [linux.do/t/topic/2027789](https://linux.do/t/topic/2027789)

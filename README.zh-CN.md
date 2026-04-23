@@ -184,3 +184,8 @@ curl.exe -sS "http://127.0.0.1:8080/v1/images/generations" `
 ```bash
 python -m unittest discover -s tests -q
 ```
+
+## 致谢
+
+- 感谢 [LINUX DO 社区](https://linux.do) 提供的讨论和实践思路，这个项目的桥接方案就是在这些交流基础上整理出来的。
+- 相关讨论帖：[linux.do/t/topic/2027789](https://linux.do/t/topic/2027789)
