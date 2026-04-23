@@ -1,5 +1,7 @@
 # openai-image-bridge
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
 `openai-image-bridge` exposes `POST /v1/images/generations` and relays each request to an upstream `POST /v1/chat/completions` endpoint that returns generated images inside the chat response payload.
 
 This is useful when:
