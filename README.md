@@ -136,7 +136,7 @@ curl.exe -sS "http://127.0.0.1:8080/v1/images/generations" `
 | `PUBLIC_BASE_URL` | 未设置 | 手动覆盖返回的图片访问前缀 |
 | `DEFAULT_RESPONSE_FORMAT` | `b64_json` | 客户端没传时默认返回格式 |
 | `ALWAYS_INCLUDE_B64_JSON` | `false` | 请求 `url` 时是否仍然附带 `b64_json` |
-| `ALWAYS_INCLUDE_URL` | `true` | 开启落盘时是否总是返回 `url` |
+| `ALWAYS_INCLUDE_URL` | `false` | 请求 `b64_json` 时是否额外附带 `url`（开启会让响应体显著变大） |
 | `CLEANUP_MAX_AGE_SECONDS` | `0` | 自动清理超过这个年龄的图片，`0` 表示关闭 |
 | `CLEANUP_SWEEP_INTERVAL_SECONDS` | `3600` | 两次清理扫描之间的最短间隔 |
 
@@ -171,6 +171,24 @@ curl.exe -sS "http://127.0.0.1:8080/v1/images/generations" `
 - 如果不希望把调用方的 token 传给上游，请设置 `UPSTREAM_AUTH_HEADER`。
 
 可参考 [examples/nginx.conf](examples/nginx.conf) 和 [examples/openai-image-bridge.service](examples/openai-image-bridge.service)。
+
+### 放在 Cloudflare / WAF 后面
+
+如果桥接层暴露在 Cloudflare 这类带 WAF 的反向代理之后，建议优先使用 `url` 形式的响应：
+
+```
+DEFAULT_RESPONSE_FORMAT=url
+ALWAYS_INCLUDE_B64_JSON=false
+ALWAYS_INCLUDE_URL=false
+PERSIST_IMAGES=true
+PUBLIC_BASE_URL=https://你的对外域名
+```
+
+原因：
+
+- `b64_json` 会把整张图片以 base64 形式塞进 JSON 响应里，单张 1024×1024 PNG 大约会让响应体膨胀到 1MB 以上。中间链路（CDN / WAF / 反向代理）对超大单次响应通常更敏感，更容易被截断或限速。
+- 长串 base64 在某些托管 WAF 规则里会被识别成可疑 payload，从而把整个响应静默 drop——表现是上游和计费记录都正常，但客户端拿不到结果。
+- 改成 `url` 后客户端会单独发起一次普通图片下载，走的是常规二进制响应，基本不会触发上述问题。
 
 ## 限制
 

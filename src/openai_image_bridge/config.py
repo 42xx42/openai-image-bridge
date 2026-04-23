@@ -132,7 +132,7 @@ class AppConfig:
     public_base_url: str | None = None
     default_response_format: str = "b64_json"
     always_include_b64_json: bool = False
-    always_include_url: bool = True
+    always_include_url: bool = False
     cleanup_max_age_seconds: int = 0
     cleanup_sweep_interval_seconds: int = 3600
 
