@@ -23,6 +23,8 @@ class ResolvedModel:
     public_model: str
     upstream_model: str
     size: str | None = None
+    async_placeholder: bool = False
+    heartbeat_stream: bool = False
 
 
 DEFAULT_MODEL_MAP = {
@@ -57,6 +59,15 @@ def _parse_int(value: str | None, default: int) -> int:
         return int(value)
     except ValueError as exc:
         raise ConfigError(f"invalid integer value: {value}") from exc
+
+
+def _parse_float(value: str | None, default: float) -> float:
+    if value is None or value == "":
+        return default
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ConfigError(f"invalid float value: {value}") from exc
 
 
 def _parse_json_object(value: str | None, default: dict[str, Any]) -> dict[str, Any]:
@@ -132,7 +143,10 @@ class AppConfig:
     public_base_url: str | None = None
     default_response_format: str = "b64_json"
     always_include_b64_json: bool = False
-    always_include_url: bool = False
+    always_include_url: bool = True
+    async_placeholder_model_suffix: str = ""
+    heartbeat_model_suffix: str = ""
+    heartbeat_interval_seconds: float = 15.0
     cleanup_max_age_seconds: int = 0
     cleanup_sweep_interval_seconds: int = 3600
 
@@ -267,6 +281,24 @@ class AppConfig:
                 else env.get("ALWAYS_INCLUDE_URL"),
                 True,
             ),
+            async_placeholder_model_suffix=str(
+                overrides.get(
+                    "async_placeholder_model_suffix",
+                    env.get("ASYNC_PLACEHOLDER_MODEL_SUFFIX", ""),
+                )
+            ),
+            heartbeat_model_suffix=str(
+                overrides.get(
+                    "heartbeat_model_suffix",
+                    env.get("HEARTBEAT_MODEL_SUFFIX", ""),
+                )
+            ),
+            heartbeat_interval_seconds=float(
+                overrides.get(
+                    "heartbeat_interval_seconds",
+                    _parse_float(env.get("HEARTBEAT_INTERVAL_SECONDS"), 15.0),
+                )
+            ),
             cleanup_max_age_seconds=int(
                 overrides.get(
                     "cleanup_max_age_seconds",
@@ -289,28 +321,108 @@ class AppConfig:
             raise ConfigError("CLEANUP_MAX_AGE_SECONDS must be >= 0")
         if config.cleanup_sweep_interval_seconds <= 0:
             raise ConfigError("CLEANUP_SWEEP_INTERVAL_SECONDS must be > 0")
+        if (
+            config.async_placeholder_model_suffix
+            and config.heartbeat_model_suffix
+            and config.async_placeholder_model_suffix == config.heartbeat_model_suffix
+        ):
+            raise ConfigError(
+                "ASYNC_PLACEHOLDER_MODEL_SUFFIX and HEARTBEAT_MODEL_SUFFIX must differ"
+            )
+        if (
+            config.async_placeholder_model_suffix
+            and not config.persist_images
+        ):
+            raise ConfigError(
+                "ASYNC_PLACEHOLDER_MODEL_SUFFIX requires PERSIST_IMAGES=true"
+            )
+        if (
+            config.async_placeholder_model_suffix
+            and config.always_include_b64_json
+        ):
+            raise ConfigError(
+                "ASYNC_PLACEHOLDER_MODEL_SUFFIX does not support ALWAYS_INCLUDE_B64_JSON=true"
+            )
+        if config.heartbeat_interval_seconds <= 0:
+            raise ConfigError("HEARTBEAT_INTERVAL_SECONDS must be > 0")
         return config
 
     def resolve_model(self, requested_model: str, requested_size: str | None) -> ResolvedModel:
-        if requested_model in self.model_map:
-            mapping = self.model_map[requested_model]
+        async_placeholder = False
+        heartbeat_stream = False
+        normalized_model = requested_model
+        if (
+            self.async_placeholder_model_suffix
+            and requested_model.endswith(self.async_placeholder_model_suffix)
+        ):
+            async_placeholder = True
+            normalized_model = requested_model[: -len(self.async_placeholder_model_suffix)]
+            if not normalized_model:
+                raise ConfigError(
+                    "model name becomes empty after removing ASYNC_PLACEHOLDER_MODEL_SUFFIX"
+                )
+        elif (
+            self.heartbeat_model_suffix
+            and requested_model.endswith(self.heartbeat_model_suffix)
+        ):
+            heartbeat_stream = True
+            normalized_model = requested_model[: -len(self.heartbeat_model_suffix)]
+            if not normalized_model:
+                raise ConfigError(
+                    "model name becomes empty after removing HEARTBEAT_MODEL_SUFFIX"
+                )
+
+        if normalized_model in self.model_map:
+            mapping = self.model_map[normalized_model]
             return ResolvedModel(
                 public_model=requested_model,
                 upstream_model=mapping.upstream_model,
                 size=mapping.size or requested_size,
+                async_placeholder=async_placeholder,
+                heartbeat_stream=heartbeat_stream,
             )
         if requested_size and requested_size in self.size_map:
             return ResolvedModel(
                 public_model=requested_model,
                 upstream_model=self.size_map[requested_size],
                 size=requested_size,
+                async_placeholder=async_placeholder,
+                heartbeat_stream=heartbeat_stream,
             )
         if self.allow_unmapped_model_passthrough:
             return ResolvedModel(
                 public_model=requested_model,
-                upstream_model=requested_model,
+                upstream_model=normalized_model,
                 size=requested_size,
+                async_placeholder=async_placeholder,
+                heartbeat_stream=heartbeat_stream,
             )
         raise ConfigError(
             f"no upstream mapping found for model={requested_model!r}, size={requested_size!r}"
         )
+
+    def list_public_model_ids(self) -> list[str]:
+        base_models: list[str] = []
+        seen: set[str] = set()
+
+        if self.default_public_model and self.default_public_model not in seen:
+            base_models.append(self.default_public_model)
+            seen.add(self.default_public_model)
+
+        for public_model in self.model_map:
+            if public_model not in seen:
+                base_models.append(public_model)
+                seen.add(public_model)
+
+        expanded_models: list[str] = []
+        for base_model in base_models:
+            expanded_models.append(base_model)
+            if self.async_placeholder_model_suffix:
+                expanded_models.append(
+                    f"{base_model}{self.async_placeholder_model_suffix}"
+                )
+            if self.heartbeat_model_suffix:
+                expanded_models.append(
+                    f"{base_model}{self.heartbeat_model_suffix}"
+                )
+        return expanded_models

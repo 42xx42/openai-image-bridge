@@ -82,6 +82,12 @@ Example response:
 }
 ```
 
+If you want to try placeholder URLs, expose a second model name with a suffix such as `gpt-image-2-async`. Only suffixed model names use placeholder mode; the normal model stays synchronous.
+
+If you want to try heartbeat keepalive mode, expose another suffixed model such as `gpt-image-2-hb`. Only those suffixed model names use chunked whitespace heartbeats while the bridge waits for the final JSON response.
+
+The `/v1/models` endpoint automatically expands every base model into the full suffix set, so clients can refresh the model list and see the base, `-async`, and `-hb` variants directly.
+
 ## Configuration
 
 | Variable | Default | Purpose |
@@ -105,7 +111,10 @@ Example response:
 | `PUBLIC_BASE_URL` | unset | Override the generated file base URL |
 | `DEFAULT_RESPONSE_FORMAT` | `b64_json` | Default response format when the client omits it |
 | `ALWAYS_INCLUDE_B64_JSON` | `false` | Always include `b64_json` even when `url` is requested |
-| `ALWAYS_INCLUDE_URL` | `false` | Also attach `url` when the client requests `b64_json` (significantly enlarges the response body) |
+| `ALWAYS_INCLUDE_URL` | `true` | Always include a `url` when persistence is enabled |
+| `ASYNC_PLACEHOLDER_MODEL_SUFFIX` | empty | Only model names ending with this suffix use experimental placeholder URL mode |
+| `HEARTBEAT_MODEL_SUFFIX` | empty | Only model names ending with this suffix use experimental heartbeat keepalive mode |
+| `HEARTBEAT_INTERVAL_SECONDS` | `15` | Seconds between keepalive whitespace chunks in heartbeat mode |
 | `CLEANUP_MAX_AGE_SECONDS` | `0` | Delete files older than this age, disabled when `0` |
 | `CLEANUP_SWEEP_INTERVAL_SECONDS` | `3600` | Minimum delay between cleanup sweeps |
 
@@ -133,6 +142,39 @@ or object entries:
 
 `SIZE_MAP_JSON` is used when the public model does not have a direct mapping but the request includes a recognized `size`.
 
+## Placeholder URL Mode
+
+Set `ASYNC_PLACEHOLDER_MODEL_SUFFIX=-async` to enable placeholder mode only for models with that suffix. For example:
+
+- `gpt-image-2`: normal synchronous behavior
+- `gpt-image-2-async`: return a `/generated/job-...` URL immediately and finish rendering in the background
+
+Before the job finishes, that URL serves an SVG placeholder image. Once the background render completes, the same URL starts serving the final image bytes.
+
+This is useful for experimenting around long request timeouts, but it comes with real tradeoffs:
+
+- It only works with `response_format=url`
+- It requires `PERSIST_IMAGES=true`
+- It does not support `ALWAYS_INCLUDE_B64_JSON=true`
+- Some clients may cache the placeholder image, so test with `Cache-Control: no-store`
+- This is still a compatibility hack, not a true asynchronous OpenAI image API
+
+## Heartbeat Keepalive Mode
+
+Set `HEARTBEAT_MODEL_SUFFIX=-hb` to enable heartbeat mode only for models with that suffix. For example:
+
+- `gpt-image-2`: normal synchronous behavior
+- `gpt-image-2-hb`: start a chunked response immediately, emit whitespace keepalives, then finish with the final JSON body
+
+The goal is to keep proxies and CDNs from treating the request as idle while the upstream image generation is still running.
+
+This mode also has clear limits:
+
+- It depends on every hop accepting HTTP chunked responses
+- Some clients, proxies, or WAF layers may buffer the whole response and defeat the heartbeat
+- If the upstream fails after heartbeat streaming has already started, the HTTP status code is already committed and the final JSON body can only contain an error object
+- Treat it as an experimental compatibility option and test it on your real path before relying on it
+
 ## Deployment Notes
 
 - The bridge can serve generated files itself at `FILE_URL_PATH`.
@@ -140,24 +182,6 @@ or object entries:
 - If your upstream should not receive the caller's token, set `UPSTREAM_AUTH_HEADER`.
 
 See [examples/nginx.conf](examples/nginx.conf) and [examples/openai-image-bridge.service](examples/openai-image-bridge.service).
-
-### Behind Cloudflare / a WAF
-
-If you put the bridge behind Cloudflare or any reverse proxy with a managed WAF, prefer the `url` response format:
-
-```
-DEFAULT_RESPONSE_FORMAT=url
-ALWAYS_INCLUDE_B64_JSON=false
-ALWAYS_INCLUDE_URL=false
-PERSIST_IMAGES=true
-PUBLIC_BASE_URL=https://your.public.domain
-```
-
-Why:
-
-- `b64_json` embeds the entire image inside the JSON response. A single 1024×1024 PNG inflates the body to over 1 MB, and intermediate hops (CDN / WAF / reverse proxy) are far more likely to truncate or rate-limit very large single responses.
-- Long base64 strings can also match managed WAF rules that treat them as suspicious payloads, causing the response to be dropped silently — the upstream succeeds and gets billed, but the client never receives the result.
-- Switching to `url` makes the client perform a separate, plain image download, which is a normal binary response and rarely triggers any of the above.
 
 ## Limitations
 

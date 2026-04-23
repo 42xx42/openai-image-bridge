@@ -59,6 +59,12 @@ docker compose up --build -d
 - API Key: 这里填你桥接层自己的 token
 - 图片模型: 选你暴露给客户端的公开模型名，比如 `gpt-image-2`
 
+如果你想试占位 URL 模式，可以额外暴露一个带后缀的模型名，比如 `gpt-image-2-async`。只有带这个后缀的模型才会立刻返回占位 URL，普通模型仍然保持同步模式。
+
+如果你想试心跳保活模式，也可以额外暴露一个带后缀的模型名，比如 `gpt-image-2-hb`。只有带这个后缀的模型才会使用分块响应周期性发送空白心跳，最后仍然返回完整 JSON。
+
+服务的 `/v1/models` 会自动把所有基础模型展开成完整的后缀变体列表，所以客户端刷新模型后就能直接看到 `基础模型 + -async + -hb` 全套名称。
+
 ### Cherry Studio 配置示例
 
 在 Cherry Studio 里新增一个 OpenAI 兼容提供商时，可以这样配：
@@ -136,7 +142,10 @@ curl.exe -sS "http://127.0.0.1:8080/v1/images/generations" `
 | `PUBLIC_BASE_URL` | 未设置 | 手动覆盖返回的图片访问前缀 |
 | `DEFAULT_RESPONSE_FORMAT` | `b64_json` | 客户端没传时默认返回格式 |
 | `ALWAYS_INCLUDE_B64_JSON` | `false` | 请求 `url` 时是否仍然附带 `b64_json` |
-| `ALWAYS_INCLUDE_URL` | `false` | 请求 `b64_json` 时是否额外附带 `url`（开启会让响应体显著变大） |
+| `ALWAYS_INCLUDE_URL` | `true` | 开启落盘时是否总是返回 `url` |
+| `ASYNC_PLACEHOLDER_MODEL_SUFFIX` | 空 | 只有带这个后缀的模型名才走实验性的占位 URL 模式 |
+| `HEARTBEAT_MODEL_SUFFIX` | 空 | 只有带这个后缀的模型名才走实验性的心跳保活模式 |
+| `HEARTBEAT_INTERVAL_SECONDS` | `15` | 心跳模式下两次空白保活块之间的秒数 |
 | `CLEANUP_MAX_AGE_SECONDS` | `0` | 自动清理超过这个年龄的图片，`0` 表示关闭 |
 | `CLEANUP_SWEEP_INTERVAL_SECONDS` | `3600` | 两次清理扫描之间的最短间隔 |
 
@@ -164,6 +173,39 @@ curl.exe -sS "http://127.0.0.1:8080/v1/images/generations" `
 
 当公开模型本身没有直接映射，但请求里带了可识别的 `size` 时，会继续参考 `SIZE_MAP_JSON`。
 
+## 占位 URL 模式
+
+设置 `ASYNC_PLACEHOLDER_MODEL_SUFFIX=-async` 后，只有带这个后缀的模型才会走异步占位。例如：
+
+- `gpt-image-2`：保持原来的同步模式
+- `gpt-image-2-async`：立即返回一个 `/generated/job-...` URL，后台继续出图
+
+这个 URL 在任务还没完成时会返回一张 SVG 占位图；后台出图完成后，同一个 URL 会开始返回真实图片。
+
+这个模式适合试验规避长请求超时，但要注意：
+
+- 只适用于 `response_format=url`
+- 需要 `PERSIST_IMAGES=true`
+- 不支持 `ALWAYS_INCLUDE_B64_JSON=true`
+- 某些客户端可能会缓存占位图，因此更适合先做链路测试
+- 这本质上仍然是兼容性 hack，不是真正的异步 OpenAI 图片接口
+
+## 心跳保活模式
+
+设置 `HEARTBEAT_MODEL_SUFFIX=-hb` 后，只有带这个后缀的模型才会走心跳保活。例如：
+
+- `gpt-image-2`：保持原来的同步模式
+- `gpt-image-2-hb`：立即开始分块响应，周期性发送空白心跳，最后再返回完整 JSON
+
+这个模式的目标是让反向代理或 CDN 在等待上游出图时持续看到响应流量，从而尽量减少长时间无响应导致的超时。
+
+这个模式的限制也要提前知道：
+
+- 它依赖中间层接受 HTTP chunked 响应
+- 某些客户端、反代或 WAF 可能会缓冲整个响应，导致心跳失效
+- 如果上游在心跳开始后才报错，HTTP 状态码已经发出，最终只能在 JSON 体里返回错误对象
+- 这同样是实验性兼容方案，更适合先在你的实际链路里压测
+
 ## 部署说明
 
 - 桥接层可以自己托管 `FILE_URL_PATH` 下的生成图片。
@@ -171,24 +213,6 @@ curl.exe -sS "http://127.0.0.1:8080/v1/images/generations" `
 - 如果不希望把调用方的 token 传给上游，请设置 `UPSTREAM_AUTH_HEADER`。
 
 可参考 [examples/nginx.conf](examples/nginx.conf) 和 [examples/openai-image-bridge.service](examples/openai-image-bridge.service)。
-
-### 放在 Cloudflare / WAF 后面
-
-如果桥接层暴露在 Cloudflare 这类带 WAF 的反向代理之后，建议优先使用 `url` 形式的响应：
-
-```
-DEFAULT_RESPONSE_FORMAT=url
-ALWAYS_INCLUDE_B64_JSON=false
-ALWAYS_INCLUDE_URL=false
-PERSIST_IMAGES=true
-PUBLIC_BASE_URL=https://你的对外域名
-```
-
-原因：
-
-- `b64_json` 会把整张图片以 base64 形式塞进 JSON 响应里，单张 1024×1024 PNG 大约会让响应体膨胀到 1MB 以上。中间链路（CDN / WAF / 反向代理）对超大单次响应通常更敏感，更容易被截断或限速。
-- 长串 base64 在某些托管 WAF 规则里会被识别成可疑 payload，从而把整个响应静默 drop——表现是上游和计费记录都正常，但客户端拿不到结果。
-- 改成 `url` 后客户端会单独发起一次普通图片下载，走的是常规二进制响应，基本不会触发上述问题。
 
 ## 限制
 
